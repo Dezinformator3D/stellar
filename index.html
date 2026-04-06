@@ -1,0 +1,465 @@
+
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Space Shooter: Gemini AI Edition</title>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { border: 2px solid #333; background: radial-gradient(circle, #101825 0%, #000 100%); cursor: none; }
+        #ui { position: absolute; top: 20px; width: 560px; color: #fff; pointer-events: none; text-shadow: 2px 2px #000; z-index: 10; }
+        .stats { display: flex; justify-content: space-between; font-size: 20px; font-weight: bold; }
+        
+        #ai-comms {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 500px;
+            background: rgba(0, 40, 80, 0.7);
+            border: 1px solid #0af;
+            color: #0ff;
+            padding: 10px;
+            font-size: 14px;
+            border-radius: 5px;
+            display: none;
+            text-align: center;
+            box-shadow: 0 0 15px rgba(0, 170, 255, 0.5);
+        }
+        .ai-label { font-size: 10px; color: #fff; text-transform: uppercase; margin-bottom: 5px; display: block; opacity: 0.8; }
+        #loading-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #0ff;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="loading-indicator">ЗАГРУЗКА РЕСУРСОВ...</div>
+
+<div id="ui">
+    <div class="stats">
+        <div>ОЧКИ: <span id="score">0</span></div>
+        <div>ЖИЗНИ: <span id="hp">3</span></div>
+    </div>
+</div>
+
+<div id="ai-comms">
+    <span class="ai-label">✨ СВЯЗЬ С КОМАНДОВАНИЕМ (GEMINI AI)</span>
+    <div id="ai-text">Инициализация нейросети...</div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+const apiKey = ""; // Ключ предоставляется средой
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = 600;
+canvas.height = 800;
+
+let score = 0;
+let frames = 0;
+let gameActive = false;
+const keys = {};
+const entities = { player: null, bullets: [], enemies: [], powerups: [], particles: [], stars: [] };
+
+// Конфигурация сложности (может меняться ИИ)
+let gameConfig = {
+    waveInterval: 240,
+    enemySpeedMult: 1.0,
+    rowsBonus: 0
+};
+
+const assets = {
+    player: 'player.png',
+    stingerA: 'a_stinger.png',
+    stingerB: 'b_stinger.png',
+    ufo: 'ufo.png',
+    mtlspdr: 'mtlspdr.png',
+    octopus: 'octopus.png',
+    scullship: 'scullship.png',
+    strider: 'strider.png',
+    ywing: 'y-wing.png',
+    bughead: 'bughead.png',
+    eye: 'eye.png',
+    bulletNormal: '07.png',
+    bulletRapid: '02.png',
+    c1: 'crossed1.png', 
+    c2: 'crossed2.png', 
+    c3: 'crossed3.png', 
+    c4: 'crossed4.png', 
+    c5: 'crossed5.png', 
+    c6: 'crossed6.png',
+    p_3way: '3way.png',
+    p_shield: 'shield.png',
+    p_rapid: 'rapid.png',
+    p_speed: 'speedup.png',
+    p_extra: 'extra_life.png',
+    p_crossed: 'crossed.png'
+};
+
+const images = {};
+let totalAssets = Object.keys(assets).length;
+let loadedAssets = 0;
+
+Object.entries(assets).forEach(([key, src]) => {
+    const img = new Image();
+    img.src = src;
+    img.onload = () => { images[key] = img; checkAllLoaded(); };
+    img.onerror = () => {
+        const placeholder = document.createElement('canvas');
+        placeholder.width = 32; placeholder.height = 32;
+        images[key] = placeholder;
+        checkAllLoaded();
+    };
+});
+
+function checkAllLoaded() {
+    loadedAssets++;
+    if (loadedAssets === totalAssets) {
+        document.getElementById('loading-indicator').style.display = 'none';
+        init();
+    }
+}
+
+// --- GEMINI API INTEGRATION ---
+
+async function callGemini(prompt, isSystem = false) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+    const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: isSystem ? undefined : { parts: [{ text: "Ты — бортовой компьютер космического истребителя в ретро-игре. Твои сообщения должны быть короткими (до 15 слов), в стиле Galaga/Star Wars, на русском языке. Используй термины: 'Пилот', 'Сектор', 'Захватчики', 'Гиперпрыжок'." }] }
+    };
+
+    let retries = 0;
+    const delays = [1000, 2000, 4000, 8000, 16000];
+
+    while (retries < 5) {
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            return data.candidates?.[0]?.content?.parts?.[0]?.text || "Связь потеряна...";
+        } catch (e) {
+            retries++;
+            if (retries === 5) return "Ошибка систем связи...";
+            await new Promise(res => setTimeout(res, delays[retries-1]));
+        }
+    }
+}
+
+async function updateAIStrategy() {
+    const p = entities.player;
+    if (!p) return;
+
+    // Анализ состояния для ИИ
+    const context = `Текущий счет: ${score}. Жизни: ${p.hp}. Оружие: ${p.weapon}. 
+    Напиши короткую фразу поддержки и верни JSON со следующими изменениями сложности (1-5): enemySpeed, waveFrequency, rowsCount.`;
+    
+    // Запрос структурированных данных
+    const strategyUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+    const strategyPayload = {
+        contents: [{ parts: [{ text: context }] }],
+        generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: "OBJECT",
+                properties: {
+                    message: { type: "STRING" },
+                    enemySpeed: { type: "NUMBER" },
+                    waveFrequency: { type: "NUMBER" },
+                    rowsCount: { type: "NUMBER" }
+                }
+            }
+        }
+    };
+
+    try {
+        const response = await fetch(strategyUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(strategyPayload)
+        });
+        const result = await response.json();
+        const data = JSON.parse(result.candidates[0].content.parts[0].text);
+
+        // Применяем изменения
+        gameConfig.enemySpeedMult = 0.8 + (data.enemySpeed * 0.1);
+        gameConfig.waveInterval = Math.max(120, 300 - (data.waveFrequency * 30));
+        gameConfig.rowsBonus = Math.floor(data.rowsCount / 2);
+
+        showAIComms(data.message);
+    } catch (e) {
+        console.error("AI Strategy error", e);
+    }
+}
+
+function showAIComms(text) {
+    const el = document.getElementById('ai-comms');
+    const txt = document.getElementById('ai-text');
+    txt.innerText = text;
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+// --- GAME LOGIC ---
+
+function init() {
+    entities.player = {
+        x: 275, y: 700, w: 50, h: 50, hp: 3, 
+        speed: 5, cooldown: 0,
+        weapon: 'normal', 
+        shield: 0, rapid: 0, speedBoost: 0
+    };
+    entities.stars = [];
+    for(let i=0; i<60; i++) entities.stars.push({x: Math.random()*600, y: Math.random()*800, v: Math.random()*3+1});
+    
+    window.onkeydown = e => keys[e.code] = true;
+    window.onkeyup = e => keys[e.code] = false;
+    
+    gameActive = true;
+    requestAnimationFrame(gameLoop);
+
+    // Первое приветствие от ИИ
+    setTimeout(() => showAIComms("Внимание, Пилот! Захватчики вошли в наш Сектор. Приготовься к бою!"), 1000);
+    
+    // Каждые 30 секунд ИИ меняет стратегию
+    setInterval(() => {
+        if (gameActive) updateAIStrategy();
+    }, 30000);
+}
+
+function gameLoop() {
+    if (!gameActive) return;
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function update() {
+    frames++;
+    const p = entities.player;
+    if (!p) return;
+
+    let actualSpeed = p.speed + (p.speedBoost > 0 ? 3 : 0);
+    if ((keys['ArrowLeft'] || keys['KeyA']) && p.x > 0) p.x -= actualSpeed;
+    if ((keys['ArrowRight'] || keys['KeyD']) && p.x < canvas.width - p.w) p.x += actualSpeed;
+    if ((keys['ArrowUp'] || keys['KeyW']) && p.y > 0) p.y -= actualSpeed;
+    if ((keys['ArrowDown'] || keys['KeyS']) && p.y < canvas.height - p.h) p.y += actualSpeed;
+
+    if (p.cooldown > 0) p.cooldown--;
+    if ((keys['Space'] || keys['Enter']) && p.cooldown <= 0) {
+        fire(p);
+        p.cooldown = p.rapid > 0 ? 7 : 15;
+    }
+
+    if (p.shield > 0) p.shield--;
+    if (p.rapid > 0) p.rapid--;
+    if (p.speedBoost > 0) p.speedBoost--;
+
+    entities.stars.forEach(s => { s.y += s.v; if(s.y > 800) s.y = 0; });
+
+    if (frames % gameConfig.waveInterval === 0) spawnGalagaWave();
+
+    entities.bullets.forEach((b, i) => {
+        b.y -= b.v; b.x += b.vx || 0;
+        if (b.anim) {
+            b.frameCounter = (b.frameCounter || 0) + 1;
+            if (b.frameCounter % 5 === 0) b.frame = (b.frame + 1) % b.anim.length;
+        }
+        if (b.y < -50 || b.y > 850 || b.x < -50 || b.x > 650) entities.bullets.splice(i, 1);
+    });
+
+    entities.enemies.forEach((e, ei) => {
+        if (e.entering) {
+            e.progress += 0.015 * gameConfig.enemySpeedMult;
+            const t = e.progress;
+            const cx = (1-t)**2 * e.startX + 2*(1-t)*t * e.cpX + t**2 * e.targetX;
+            const cy = (1-t)**2 * e.startY + 2*(1-t)*t * e.cpY + t**2 * e.targetY;
+            e.x = cx; e.y = cy;
+            if (t >= 1) e.entering = false;
+        } else {
+            e.x += Math.sin(frames / 30) * 0.5;
+            e.y += Math.cos(frames / 60) * 0.2;
+            if (Math.random() < 0.001 * gameConfig.enemySpeedMult) e.diving = true;
+            if (e.diving) e.y += (4 * gameConfig.enemySpeedMult);
+        }
+
+        entities.bullets.forEach((b, bi) => {
+            if (rectIntersect(b, e)) {
+                e.hp--;
+                entities.bullets.splice(bi, 1);
+                if (e.hp <= 0) {
+                    explode(e.x + e.w/2, e.y + e.h/2);
+                    if (Math.random() < 0.08) spawnPowerup(e.x, e.y);
+                    entities.enemies.splice(ei, 1);
+                    score += 150;
+                    if (score % 5000 === 0) showAIComms("✨ Великолепно, Пилот! Сектор почти зачищен.");
+                }
+            }
+        });
+
+        if (rectIntersect(p, e)) {
+            if (p.shield <= 0) { 
+                p.hp--; 
+                p.shield = 60; 
+                explode(p.x+25, p.y+25); 
+                showAIComms("✨ Осторожно! Целостность корпуса под угрозой!");
+            }
+            entities.enemies.splice(ei, 1);
+            if (p.hp <= 0) endGame();
+        }
+        if (e.y > 850) entities.enemies.splice(ei, 1);
+    });
+
+    entities.powerups.forEach((pw, i) => {
+        pw.y += 2;
+        if (rectIntersect(p, pw)) { applyPowerup(pw.type); entities.powerups.splice(i, 1); }
+        if (pw.y > 850) entities.powerups.splice(i, 1);
+    });
+
+    entities.particles.forEach((pt, i) => {
+        pt.x += pt.vx; pt.y += pt.vy; pt.l--;
+        if (pt.l <= 0) entities.particles.splice(i, 1);
+    });
+
+    document.getElementById('score').innerText = score;
+    document.getElementById('hp').innerText = p.hp;
+}
+
+function fire(p) {
+    const bulletImg = p.rapid > 0 ? images.bulletRapid : images.bulletNormal;
+    if (p.weapon === 'crossed') {
+        const anim = [images.c1, images.c2, images.c3, images.c4, images.c5, images.c6];
+        entities.bullets.push({x: p.x + 10, y: p.y, v: 8, w: 32, h: 32, anim: anim, frame: 0});
+    } else if (p.weapon === '3way') {
+        entities.bullets.push({x: p.x + 20, y: p.y, v: 12, w: 12, h: 24, img: bulletImg});
+        entities.bullets.push({x: p.x + 5, y: p.y + 10, v: 11, vx: -2, w: 12, h: 24, img: bulletImg});
+        entities.bullets.push({x: p.x + 35, y: p.y + 10, v: 11, vx: 2, w: 12, h: 24, img: bulletImg});
+    } else {
+        entities.bullets.push({x: p.x + 20, y: p.y, v: 12, w: 12, h: 24, img: bulletImg});
+    }
+}
+
+function spawnGalagaWave() {
+    const waveTypes = [
+        { img: 'mtlspdr', hp: 3, rows: 1 },
+        { img: 'scullship', hp: 2, rows: 2 },
+        { img: 'octopus', hp: 1, rows: 2 },
+        { img: 'bughead', hp: 1, rows: 1 },
+        { img: 'ywing', hp: 2, rows: 1 },
+        { img: 'eye', hp: 1, rows: 1 },
+        { img: 'strider', hp: 2, rows: 1 }
+    ];
+    
+    const config = waveTypes[Math.floor(Math.random() * waveTypes.length)];
+    const cols = 6;
+    const spacingX = 70;
+    const spacingY = 60;
+    const startSide = Math.random() > 0.5 ? -100 : 700;
+    const finalRows = config.rows + gameConfig.rowsBonus;
+
+    for (let r = 0; r < finalRows; r++) {
+        for (let c = 0; c < cols; c++) {
+            entities.enemies.push({
+                img: config.img,
+                startX: startSide,
+                startY: 200,
+                cpX: 300,
+                cpY: -100,
+                targetX: 100 + c * spacingX,
+                targetY: 100 + r * spacingY,
+                progress: 0,
+                entering: true,
+                diving: false,
+                w: 45, h: 45,
+                hp: config.hp,
+            });
+        }
+    }
+}
+
+function applyPowerup(type) {
+    const p = entities.player;
+    if (type === 'p_3way') p.weapon = '3way';
+    if (type === 'p_crossed') p.weapon = 'crossed';
+    if (type === 'p_shield') p.shield = 600;
+    if (type === 'p_rapid') p.rapid = 600;
+    if (type === 'p_speed') p.speedBoost = 600;
+    if (type === 'p_extra') p.hp++;
+    showAIComms("✨ Системы усилены! Огонь на поражение.");
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#fff';
+    entities.stars.forEach(s => ctx.fillRect(s.x, s.y, s.v/2, s.v/2));
+
+    entities.bullets.forEach(b => {
+        if (b.anim) ctx.drawImage(b.anim[b.frame], b.x, b.y, b.w, b.h);
+        else if (b.img) ctx.drawImage(b.img, b.x, b.y, b.w, b.h);
+    });
+
+    entities.enemies.forEach(e => {
+        if (images[e.img]) ctx.drawImage(images[e.img], e.x, e.y, e.w, e.h);
+    });
+
+    entities.powerups.forEach(pw => {
+        if (images[pw.type]) ctx.drawImage(images[pw.type], pw.x, pw.y, pw.w, pw.h);
+    });
+
+    if (images.player) ctx.drawImage(images.player, entities.player.x, entities.player.y, 50, 50);
+    
+    if (entities.player.shield > 0) {
+        ctx.strokeStyle = '#0af'; ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(entities.player.x + 25, entities.player.y + 25, 38, 0, Math.PI*2);
+        ctx.stroke();
+    }
+
+    entities.particles.forEach(pt => {
+        ctx.fillStyle = `rgba(255, ${pt.l*10}, 0, ${pt.l/20})`;
+        ctx.fillRect(pt.x, pt.y, 3, 3);
+    });
+}
+
+function explode(x, y) {
+    for(let i=0; i<15; i++) {
+        entities.particles.push({
+            x, y, vx: (Math.random()-0.5)*8, vy: (Math.random()-0.5)*8, l: 20
+        });
+    }
+}
+
+function rectIntersect(r1, r2) {
+    return r1.x < r2.x + r2.w && r1.x + r1.w > r2.x && r1.y < r2.y + r2.h && r1.y + r1.h > r2.y;
+}
+
+function endGame() {
+    gameActive = false;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0,0,600,800);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = '40px Courier New';
+    ctx.fillText('ИГРА ОКОНЧЕНА', 300, 350);
+    ctx.font = '20px Courier New';
+    ctx.fillText(`ФИНАЛЬНЫЙ СЧЕТ: ${score}`, 300, 400);
+    ctx.fillText('Нажми SPACE для рестарта', 300, 450);
+    
+    callGemini(`Пилот погиб со счетом ${score}. Напиши очень короткий некролог в космическом стиле.`).then(msg => {
+        showAIComms(msg);
+    });
+
+    window.onkeydown = e => { if (e.code === 'Space') location.reload(); };
+}
+</script>
+</body>
+</html>
